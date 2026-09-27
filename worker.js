@@ -15,6 +15,7 @@ function statePayload(state){if(!validState(state))return {error:'Estado inváli
 async function ensureSchema(env){await env.DB.prepare(`CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY,state TEXT NOT NULL,edit_token_hash TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`).run()}
 export default {async fetch(req,env){const u=new URL(req.url);if(!u.pathname.startsWith('/api/'))return env.ASSETS.fetch(req);try{
  await ensureSchema(env);
+ if(u.pathname==='/api/health'&&req.method==='GET')return json({ok:true,database:true,service:'domino-cubano'});
  if(u.pathname==='/api/rooms'&&req.method==='POST'){
   const body=await req.json();const payload=statePayload(body.state);if(payload.error)return json({error:payload.error},payload.status);
   let id;for(let i=0;i<8;i++){id=code();const x=await env.DB.prepare('SELECT id FROM rooms WHERE id=?').bind(id).first();if(!x)break}
