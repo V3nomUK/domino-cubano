@@ -5,6 +5,7 @@ const token=()=>{const a=new Uint8Array(32);crypto.getRandomValues(a);return [..
 async function hash(s){const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')}
 function validState(s){
  if(!s||typeof s!=='object'||!Array.isArray(s.teams)||s.teams.length<2||s.teams.length>50)return false;
+ if(s.roomName!==undefined&&(typeof s.roomName!=='string'||s.roomName.trim().length>80))return false;
  if(!Array.isArray(s.active)||!Array.isArray(s.queue)||!Array.isArray(s.history)||typeof s.wins!=='object'||!s.wins||typeof s.partials!=='object'||!s.partials)return false;
  const ids=new Set();
  for(const t of s.teams){if(!t||typeof t.id!=='string'||!/^[A-Za-z0-9_-]{1,64}$/.test(t.id)||ids.has(t.id)||typeof t.name!=='string'||t.name.length>80)return false;ids.add(t.id)}
