@@ -1,0 +1,12 @@
+const json=(data,status=200,extra={})=>new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store',...extra}});
+const code=()=>{const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';let s='';crypto.getRandomValues(new Uint8Array(7)).forEach(n=>s+=chars[n%chars.length]);return s};
+const token=()=>{const a=new Uint8Array(32);crypto.getRandomValues(a);return [...a].map(x=>x.toString(16).padStart(2,'0')).join('')};
+async function hash(s){const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')}
+export default {async fetch(req,env){const u=new URL(req.url);if(!u.pathname.startsWith('/api/'))return env.ASSETS.fetch(req);try{
+ if(u.pathname==='/api/rooms'&&req.method==='POST'){const body=await req.json();if(!body.state)return json({error:'Estado requerido'},400);let id;for(let i=0;i<5;i++){id=code();const x=await env.DB.prepare('SELECT id FROM rooms WHERE id=?').bind(id).first();if(!x)break}const editToken=token(),h=await hash(editToken),now=new Date().toISOString();await env.DB.prepare('INSERT INTO rooms(id,state,edit_token_hash,version,created_at,updated_at) VALUES(?,?,?,?,?,?)').bind(id,JSON.stringify(body.state),h,1,now,now).run();return json({roomId:id,editToken,version:1},201)}
+ const m=u.pathname.match(/^\/api\/rooms\/([A-Z0-9]+)$/i);if(m){const id=m[1].toUpperCase(),row=await env.DB.prepare('SELECT * FROM rooms WHERE id=?').bind(id).first();if(!row)return json({error:'Partida no encontrada'},404);
+  if(req.method==='GET')return json({roomId:id,state:JSON.parse(row.state),version:row.version,updatedAt:row.updated_at});
+  if(req.method==='PUT'){const auth=(req.headers.get('authorization')||'').replace(/^Bearer\s+/i,'');if(!auth||await hash(auth)!==row.edit_token_hash)return json({error:'Sin permiso para editar'},401);const body=await req.json();if(Number(body.version)!==Number(row.version))return json({error:'Conflicto de versión',state:JSON.parse(row.state),version:row.version},409);if(!body.state)return json({error:'Estado requerido'},400);const v=Number(row.version)+1,now=new Date().toISOString();await env.DB.prepare('UPDATE rooms SET state=?,version=?,updated_at=? WHERE id=?').bind(JSON.stringify(body.state),v,now,id).run();return json({roomId:id,version:v,updatedAt:now})}
+ }
+ return json({error:'Ruta no encontrada'},404)
+ }catch(e){return json({error:'Error del servidor'},500)}}};
