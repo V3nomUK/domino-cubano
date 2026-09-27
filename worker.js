@@ -23,6 +23,25 @@ export default {async fetch(req,env){const u=new URL(req.url);if(!u.pathname.sta
   await env.DB.prepare('INSERT INTO rooms(id,state,edit_token_hash,version,created_at,updated_at) VALUES(?,?,?,?,?,?)').bind(id,payload.raw,h,1,now,now).run();
   return json({roomId:id,editToken,version:1},201);
  }
+ const joinMatch=u.pathname.match(/^\/api\/rooms\/([A-Z0-9]+)\/join$/i);
+ if(joinMatch){
+  if(req.method!=='POST')return json({error:'Método no permitido'},405);
+  const id=joinMatch[1].toUpperCase(),row=await env.DB.prepare('SELECT * FROM rooms WHERE id=?').bind(id).first();
+  if(!row)return json({error:'Partida no encontrada'},404);
+  let body;try{body=await req.json()}catch{return json({error:'Solicitud inválida'},400)}
+  const name=typeof body.name==='string'?body.name.trim():'';
+  if(!name||name.length>80)return json({error:'Escribe un nombre de equipo de hasta 80 caracteres'},400);
+  const state=JSON.parse(row.state);
+  if(state.teams.length>=50)return json({error:'La sala ya tiene el máximo de equipos'},409);
+  if(state.teams.some(team=>team.name.trim().toLocaleLowerCase()===name.toLocaleLowerCase()))return json({error:'Ese equipo ya está en la sala'},409);
+  let teamId;do{teamId='guest_'+token().slice(0,16)}while(state.teams.some(team=>team.id===teamId));
+  state.teams.push({id:teamId,name});state.queue.push(teamId);
+  const payload=statePayload(state);if(payload.error)return json({error:payload.error},payload.status);
+  const v=Number(row.version)+1,now=new Date().toISOString();
+  const result=await env.DB.prepare('UPDATE rooms SET state=?,version=?,updated_at=? WHERE id=? AND version=?').bind(payload.raw,v,now,id,row.version).run();
+  if(result.meta?.changes===0){const current=await env.DB.prepare('SELECT * FROM rooms WHERE id=?').bind(id).first();return json({error:'Conflicto de versión',state:current?JSON.parse(current.state):null,version:current?.version},409)}
+  return json({roomId:id,state,version:v,addedTeamId:teamId,updatedAt:now});
+ }
  const m=u.pathname.match(/^\/api\/rooms\/([A-Z0-9]+)$/i);
  if(m){
   const id=m[1].toUpperCase(),row=await env.DB.prepare('SELECT * FROM rooms WHERE id=?').bind(id).first();
@@ -35,7 +54,8 @@ export default {async fetch(req,env){const u=new URL(req.url);if(!u.pathname.sta
    if(Number(body.version)!==Number(row.version))return json({error:'Conflicto de versión',state:JSON.parse(row.state),version:row.version},409);
    const payload=statePayload(body.state);if(payload.error)return json({error:payload.error},payload.status);
    const v=Number(row.version)+1,now=new Date().toISOString();
-   await env.DB.prepare('UPDATE rooms SET state=?,version=?,updated_at=? WHERE id=?').bind(payload.raw,v,now,id).run();
+   const result=await env.DB.prepare('UPDATE rooms SET state=?,version=?,updated_at=? WHERE id=? AND version=?').bind(payload.raw,v,now,id,row.version).run();
+   if(result.meta?.changes===0){const current=await env.DB.prepare('SELECT * FROM rooms WHERE id=?').bind(id).first();return json({error:'Conflicto de versión',state:current?JSON.parse(current.state):null,version:current?.version},409)}
    return json({roomId:id,version:v,updatedAt:now});
   }
  }
