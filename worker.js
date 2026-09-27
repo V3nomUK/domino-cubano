@@ -13,7 +13,7 @@ function validState(s){
  return true;
 }
 function statePayload(state){if(!validState(state))return {error:'Estado inválido',status:400};const raw=JSON.stringify(state);if(new TextEncoder().encode(raw).byteLength>MAX_STATE_BYTES)return {error:'La partida es demasiado grande',status:413};return {raw}}
-async function ensureSchema(env){await env.DB.prepare(`CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY,state TEXT NOT NULL,edit_token_hash TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`).run()}
+async function ensureSchema(env){await env.DB.prepare(`CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY,state TEXT NOT NULL,edit_token_hash TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`).run();await env.DB.prepare(`CREATE TABLE IF NOT EXISTS room_moderators (id TEXT PRIMARY KEY,room_id TEXT NOT NULL,name TEXT NOT NULL,token_hash TEXT NOT NULL,created_at TEXT NOT NULL)`).run()}
 export default {async fetch(req,env){const u=new URL(req.url);if(!u.pathname.startsWith('/api/'))return env.ASSETS.fetch(req);try{
  await ensureSchema(env);
  if(u.pathname==='/api/health'&&req.method==='GET')return json({ok:true,database:true,service:'domino-cubano'});
@@ -23,6 +23,26 @@ export default {async fetch(req,env){const u=new URL(req.url);if(!u.pathname.sta
   const editToken=token(),h=await hash(editToken),now=new Date().toISOString();
   await env.DB.prepare('INSERT INTO rooms(id,state,edit_token_hash,version,created_at,updated_at) VALUES(?,?,?,?,?,?)').bind(id,payload.raw,h,1,now,now).run();
   return json({roomId:id,editToken,version:1},201);
+ }
+ const moderatorMatch=u.pathname.match(/^\/api\/rooms\/([A-Z0-9]+)\/moderators(?:\/([A-Za-z0-9_-]+))?$/i);
+ if(moderatorMatch){
+  const id=moderatorMatch[1].toUpperCase(),moderatorId=moderatorMatch[2],row=await env.DB.prepare('SELECT * FROM rooms WHERE id=?').bind(id).first();
+  if(!row)return json({error:'Partida no encontrada'},404);
+  const auth=(req.headers.get('authorization')||'').replace(/^Bearer\s+/i,'');
+  if(!auth||await hash(auth)!==row.edit_token_hash)return json({error:'Solo el anfitrión puede gestionar moderadores'},401);
+  if(req.method==='GET'&&!moderatorId){const result=await env.DB.prepare('SELECT id,name,created_at FROM room_moderators WHERE room_id=?').bind(id).all();return json({moderators:result.results||[]})}
+  if(req.method==='POST'&&!moderatorId){let body;try{body=await req.json()}catch{return json({error:'Solicitud inválida'},400)}const name=typeof body.name==='string'?body.name.trim():'';if(!name||name.length>80)return json({error:'Escribe un nombre de moderador de hasta 80 caracteres'},400);const accessToken=token(),moderatorId='mod_'+token().slice(0,16);await env.DB.prepare('INSERT INTO room_moderators(id,room_id,name,token_hash,created_at) VALUES(?,?,?,?,?)').bind(moderatorId,id,name,await hash(accessToken),new Date().toISOString()).run();return json({moderatorId,name,accessToken},201)}
+  if(req.method==='DELETE'&&moderatorId){await env.DB.prepare('DELETE FROM room_moderators WHERE id=? AND room_id=?').bind(moderatorId,id).run();return json({ok:true})}
+  return json({error:'Método no permitido'},405);
+ }
+ const accessMatch=u.pathname.match(/^\/api\/rooms\/([A-Z0-9]+)\/access$/i);
+ if(accessMatch){
+  if(req.method!=='GET')return json({error:'Método no permitido'},405);
+  const id=accessMatch[1].toUpperCase(),row=await env.DB.prepare('SELECT * FROM rooms WHERE id=?').bind(id).first();if(!row)return json({error:'Partida no encontrada'},404);
+  const auth=(req.headers.get('authorization')||'').replace(/^Bearer\s+/i,'');if(!auth)return json({error:'Enlace de moderador no válido'},401);
+  if(await hash(auth)===row.edit_token_hash)return json({role:'host'});
+  const moderator=await env.DB.prepare('SELECT id FROM room_moderators WHERE room_id=? AND token_hash=?').bind(id,await hash(auth)).first();if(!moderator)return json({error:'Enlace de moderador no válido'},401);
+  return json({role:'moderator'});
  }
  const joinMatch=u.pathname.match(/^\/api\/rooms\/([A-Z0-9]+)\/join$/i);
  if(joinMatch){
@@ -50,8 +70,11 @@ export default {async fetch(req,env){const u=new URL(req.url);if(!u.pathname.sta
   if(req.method==='GET')return json({roomId:id,state:JSON.parse(row.state),version:row.version,updatedAt:row.updated_at});
   if(req.method==='PUT'){
    const auth=(req.headers.get('authorization')||'').replace(/^Bearer\s+/i,'');
-   if(!auth||await hash(auth)!==row.edit_token_hash)return json({error:'Sin permiso para editar'},401);
+   const host=auth&&await hash(auth)===row.edit_token_hash;
+   const moderator=host?null:auth&&await env.DB.prepare('SELECT id FROM room_moderators WHERE room_id=? AND token_hash=?').bind(id,await hash(auth)).first();
+   if(!host&&!moderator)return json({error:'Sin permiso para editar'},401);
    const body=await req.json();
+   if(moderator){const previous=JSON.parse(row.state),next=body.state;if(!next||JSON.stringify(next.teams)!==JSON.stringify(previous.teams)||next.roomName!==previous.roomName||!Array.isArray(next.history)||next.history.length<previous.history.length||JSON.stringify(next.history.slice(0,previous.history.length))!==JSON.stringify(previous.history))return json({error:'Un moderador no puede borrar ni cambiar los datos existentes'},403)}
    if(Number(body.version)!==Number(row.version))return json({error:'Conflicto de versión',state:JSON.parse(row.state),version:row.version},409);
    const payload=statePayload(body.state);if(payload.error)return json({error:payload.error},payload.status);
    const v=Number(row.version)+1,now=new Date().toISOString();
